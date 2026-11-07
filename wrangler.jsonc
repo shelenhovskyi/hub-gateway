@@ -10,5 +10,7 @@
   // triggers per account, so one shared trigger leaves room for the user's other projects.
   "triggers": { "crons": ["0 * * * *"] },
   "vars": { "ALLOWED_ORIGIN": "*" },
-  "observability": { "enabled": true }
+  "workers_dev": true,
+  // Preview URLs would serve every uploaded version, not just the deployed one.
+  "preview_urls": false
 }
