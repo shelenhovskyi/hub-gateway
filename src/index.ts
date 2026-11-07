@@ -3,13 +3,14 @@ import { type BotConfig, connect, DEFAULT_SETTINGS, handleUpdate, validateSettin
 import { LANGS, type Lang } from './bot/strings.ts';
 import { Telegram, TgError } from './bot/telegram.ts';
 import { buildDigest, due, fetchFeed, validateConfig } from './digest.ts';
+import { validateJob } from './jobs.ts';
 import { authorized, body, cors, type Env, HttpError, json } from './http.ts';
 
 export { Store } from './store.ts';
 
 // The entry module may export only handlers and Durable Object classes; workerd refuses anything else.
-const VERSION = '0.3.0';
-const MODULES = ['image', 'stt', 'tts', 'digest', 'bot'] as const;
+const VERSION = '0.4.0';
+const MODULES = ['image', 'stt', 'tts', 'digest', 'bot', 'jobs'] as const;
 const MAX_BODY = 25_000_000;
 
 const store = (env: Env) => env.STORE.get(env.STORE.idFromName('main'));
@@ -141,6 +142,44 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
     if (cfg) await new Telegram(cfg.token).call('deleteWebhook', { drop_pending_updates: true }).catch(() => {});
     await s.clearBot();
     return json(env, { bot: null, chats: [] });
+  }
+  if (path === '/jobs' && !post) {
+    const s = store(env);
+    const bot = await s.getBotConfig();
+    return json(env, { jobs: await s.listJobs(), notify: bot?.ownerId ? { channel: 'telegram', bot: bot.username } : { channel: 'none' } });
+  }
+  if (path === '/jobs' && post) {
+    const s = store(env);
+    const input = await body<{ id?: unknown }>(req, 20_000);
+    const existing = typeof input.id === 'string' ? await s.getJob(input.id) : null;
+    if (typeof input.id === 'string' && !existing) throw new HttpError(404, 'no such job');
+    const job = validateJob(input, Date.now(), existing ?? undefined);
+    await s.putJob(job);
+    return json(env, { job });
+  }
+  if (path === '/jobs/delete' && post) {
+    const { id } = await body<{ id?: unknown }>(req, 1000);
+    if (typeof id !== 'string') throw new HttpError(400, 'id required');
+    await store(env).deleteJob(id);
+    return json(env, { ok: true });
+  }
+  if (path === '/jobs/run' && post) {
+    const { id } = await body<{ id?: unknown }>(req, 1000);
+    const job = typeof id === 'string' ? await store(env).runJobNow(id) : null;
+    if (!job) throw new HttpError(404, 'no such job');
+    return json(env, { job });
+  }
+  // Place search for weather jobs, here rather than in the app so the app's CSP stays as narrow as it is.
+  if (path === '/weather/places' && !post) {
+    const q = url.searchParams.get('q')?.trim();
+    if (!q) throw new HttpError(400, 'q required');
+    const lang = url.searchParams.get('lang') === 'uk' ? 'uk' : 'en';
+    const res = await fetch(`https://geocoding-api.open-meteo.com/v1/search?${new URLSearchParams({ name: q.slice(0, 100), count: '5', language: lang })}`);
+    if (!res.ok) throw new HttpError(502, `Open-Meteo HTTP ${res.status}`);
+    const data = (await res.json()) as { results?: { name: string; latitude: number; longitude: number; country?: string; admin1?: string; timezone?: string }[] };
+    return json(env, {
+      places: (data.results ?? []).map((r) => ({ name: [r.name, r.admin1, r.country].filter(Boolean).join(', '), lat: r.latitude, lon: r.longitude, timezone: r.timezone })),
+    });
   }
   if (path === '/digest/run' && post) return json(env, { digest: await runDigest(env, Date.now()) });
   return json(env, { error: 'not found' }, 404);

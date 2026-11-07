@@ -1,5 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { BotConfig, BotStore, ChatRow, LogLine } from './bot/bot.ts';
+import { Telegram } from './bot/telegram.ts';
+import type { Env } from './http.ts';
+import { type Job, MAX_JOBS, nextAfter, runJob } from './jobs.ts';
 import type { Digest, DigestConfig } from './digest.ts';
 
 const KEEP_DIGESTS = 14;
@@ -10,7 +13,7 @@ const KEEP_LINES_MS = 24 * 3600_000;
  * The gateway's only state, in one SQLite-backed Durable Object. KV would be simpler, but its free
  * tier allows 1,000 writes a day; DO SQLite allows 100,000 row writes.
  */
-export class Store extends DurableObject implements BotStore {
+export class Store extends DurableObject<Env> implements BotStore {
   #ready = false;
 
   #sql() {
@@ -22,6 +25,7 @@ export class Store extends DurableObject implements BotStore {
       sql.exec('CREATE TABLE IF NOT EXISTS bot_lines (chat_id INTEGER NOT NULL, at INTEGER NOT NULL, who TEXT NOT NULL, text TEXT NOT NULL)');
       sql.exec('CREATE INDEX IF NOT EXISTS bot_lines_chat ON bot_lines (chat_id, at)');
       sql.exec('CREATE TABLE IF NOT EXISTS bot_facts (chat_id INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL)');
+      sql.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, next_at INTEGER NOT NULL, enabled INTEGER NOT NULL, body TEXT NOT NULL)');
       sql.exec('CREATE TABLE IF NOT EXISTS counters (key TEXT PRIMARY KEY, n INTEGER NOT NULL, until INTEGER NOT NULL)');
       this.#ready = true;
     }
@@ -153,5 +157,87 @@ export class Store extends DurableObject implements BotStore {
     );
     sql.exec('DELETE FROM counters WHERE until <= ?', now);
     return sql.exec<{ n: number }>('SELECT n FROM counters WHERE key = ?', key).one().n;
+  }
+
+  async listJobs(): Promise<Job[]> {
+    return this.#sql()
+      .exec<{ body: string }>('SELECT body FROM jobs ORDER BY next_at')
+      .toArray()
+      .map((r) => JSON.parse(r.body) as Job);
+  }
+
+  async getJob(id: string): Promise<Job | null> {
+    const row = this.#sql().exec<{ body: string }>('SELECT body FROM jobs WHERE id = ?', id).toArray()[0];
+    return row ? (JSON.parse(row.body) as Job) : null;
+  }
+
+  async putJob(job: Job): Promise<void> {
+    const sql = this.#sql();
+    const exists = sql.exec('SELECT 1 FROM jobs WHERE id = ?', job.id).toArray().length > 0;
+    if (!exists && sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM jobs').one().n >= MAX_JOBS) throw new Error(`at most ${MAX_JOBS} jobs`);
+    this.#save(job);
+    await this.#arm();
+  }
+
+  async deleteJob(id: string): Promise<void> {
+    this.#sql().exec('DELETE FROM jobs WHERE id = ?', id);
+    await this.#arm();
+  }
+
+  /** Runs one job now, for the app's "check now", and keeps its schedule. */
+  async runJobNow(id: string): Promise<Job | null> {
+    const job = await this.getJob(id);
+    if (!job) return null;
+    return this.#run(job, Date.now(), false);
+  }
+
+  #save(job: Job): void {
+    const next = Number.isFinite(job.nextAt) ? job.nextAt : 0;
+    this.#sql().exec(
+      'INSERT INTO jobs (id, next_at, enabled, body) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET next_at = excluded.next_at, enabled = excluded.enabled, body = excluded.body',
+      job.id,
+      next,
+      job.enabled && Number.isFinite(job.nextAt) ? 1 : 0,
+      JSON.stringify(job),
+    );
+  }
+
+  /** One alarm for the soonest enabled job; a Durable Object keeps only one. */
+  async #arm(): Promise<void> {
+    const row = this.#sql().exec<{ t: number | null }>('SELECT MIN(next_at) AS t FROM jobs WHERE enabled = 1').one();
+    if (row.t === null) await this.ctx.storage.deleteAlarm();
+    else await this.ctx.storage.setAlarm(Math.max(row.t, Date.now() + 1000));
+  }
+
+  async #run(job: Job, now: number, reschedule: boolean): Promise<Job> {
+    const r = await runJob(job, { fetch: (u, i) => fetch(u, i), now });
+    const next: Job = {
+      ...job,
+      state: r.state,
+      enabled: job.enabled && !r.disable,
+      nextAt: reschedule ? nextAfter(job, now) : job.nextAt,
+    };
+    if (reschedule && !Number.isFinite(next.nextAt)) next.enabled = false;
+    if (r.notify) await this.#notify(job, r.notify);
+    this.#save(next);
+    return next;
+  }
+
+  async #notify(job: Job, text: string): Promise<void> {
+    const cfg = await this.getBotConfig();
+    const chat = job.chatId ?? cfg?.ownerId;
+    if (!cfg || !chat) return;
+    await new Telegram(cfg.token).call('sendMessage', { chat_id: chat, text, link_preview_options: { is_disabled: true } }).catch((e) => console.error('notify', e));
+  }
+
+  /** At most a few jobs per alarm: each run may fetch a page, and one invocation gets 50 subrequests. */
+  override async alarm(): Promise<void> {
+    const now = Date.now();
+    const due = this.#sql()
+      .exec<{ body: string }>('SELECT body FROM jobs WHERE enabled = 1 AND next_at <= ? ORDER BY next_at LIMIT 5', now)
+      .toArray()
+      .map((r) => JSON.parse(r.body) as Job);
+    for (const job of due) await this.#run(job, now, true);
+    await this.#arm();
   }
 }

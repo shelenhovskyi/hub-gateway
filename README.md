@@ -6,7 +6,8 @@ Your own backend for hub, on your free Cloudflare account. It gives the hub app:
 
 - **Workers AI** without any API key: pictures (FLUX), transcription (Whisper), speech (MeloTTS), on your daily free neurons;
 - **Morning digest**: every day at the hour you choose it reads your RSS/Atom feeds and writes a short summary;
-- **Telegram bot**: your own AI bot for private chats and groups. It answers mentions and replies, understands photos and voice messages, draws, and remembers facts it is asked to. Set it up on the Telegram bot page in the hub app: paste the token from @BotFather, then press Start in the bot to become its owner. Only chats you allow get answers; `/privacy` tells members where their messages go.
+- **Watches, reminders, weather**: page and price watches (every 15 minutes or more), one-off and repeating reminders, and a morning forecast with rain, frost and heat warnings from Open-Meteo. They run from a Durable Object alarm, not the cron, and message you through your Telegram bot;
+- **Telegram bot**: your own AI bot for private chats and groups. It answers mentions and replies, understands photos and voice messages, draws, remembers facts it is asked to, sets reminders (“remind us Friday at 7”) and sums up the last day with `/catchup`. Set it up on the Telegram bot page in the hub app: paste the token from @BotFather, then press Start in the bot to become its owner. Only chats you allow get answers; `/privacy` tells members where their messages go.
 
 Nothing here is shared with the hub's authors: the Worker runs in your account and only answers requests that carry your admin token.
 
