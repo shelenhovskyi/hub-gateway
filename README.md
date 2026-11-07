@@ -1,5 +1,7 @@
 # hub gateway
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/shelenhovskyi/hub-gateway)
+
 Your own backend for hub, on your free Cloudflare account. It gives the hub app:
 
 - **Workers AI** without any API key: pictures (FLUX), transcription (Whisper), speech (MeloTTS), on your daily free neurons;
