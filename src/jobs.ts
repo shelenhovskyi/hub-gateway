@@ -1,4 +1,4 @@
-import { HttpError } from './http.ts';
+import { capStream, HttpError } from './http.ts';
 
 /**
  * Scheduled jobs. They run from a Durable Object alarm rather than the hourly cron: each alarm is
@@ -61,12 +61,22 @@ export type Job = JobConfig & {
   enabled: boolean;
   /** Telegram chat to notify; the bot's owner when absent. */
   chatId?: number;
-  nextAt: number;
+  /** Null once a one-off job has run. */
+  nextAt: number | null;
   createdAt: number;
   state: JobState;
+  /** Bot-made jobs have their own, smaller pool, so chat members cannot crowd out the owner's. */
+  source: JobSource;
+  /** Telegram user who asked the bot for it; they may cancel it besides the owner. */
+  createdBy?: number;
 };
 
+export type JobSource = 'app' | 'bot';
+
 export const MAX_JOBS = 50;
+/** Live bot reminders per chat, and in all chats together. */
+export const MAX_CHAT_REMINDERS = 5;
+export const MAX_BOT_JOBS = 100;
 export const MIN_WATCH_MIN = 15;
 /** After this many failures in a row a watch pauses itself instead of hammering a site that blocks it. */
 export const MAX_FAILURES = 6;
@@ -84,18 +94,32 @@ export function validTimezone(tz: unknown): string {
   }
 }
 
-/** Builds a job from what the app (or the bot) sends; ids and timing are ours. */
-export function validateJob(x: unknown, now: number, existing?: Job): Job {
+/** HTMLRewriter throws on a selector it cannot parse; finding out here beats failing every run. */
+function validSelector(selector: string): void {
+  if (typeof HTMLRewriter !== 'function') return;
+  try {
+    new HTMLRewriter().on(selector, {});
+  } catch {
+    throw new HttpError(400, `not a CSS selector this gateway understands: ${selector}`);
+  }
+}
+
+/**
+ * Builds a job from what the app (or the bot) sends; ids and timing are ours. A one-off time that
+ * has already passed is refused rather than stored as a job that can never run.
+ */
+export function validateJob(x: unknown, now: number, existing?: Job, origin: { source: JobSource; createdBy?: number } = { source: 'app' }): Job {
   const j = (x ?? {}) as Record<string, unknown>;
   const kind = j.kind;
   const c = (j.config ?? {}) as Record<string, unknown>;
   const timezone = validTimezone(j.timezone ?? existing?.timezone);
-  const language = j.language === 'uk' ? 'uk' : 'en';
+  const language = j.language === 'uk' || j.language === 'en' ? j.language : (existing?.language ?? 'en');
   let jc: JobConfig;
   if (kind === 'watch') {
     if (typeof c.url !== 'string' || !/^https:\/\/[^\s]+$/.test(c.url)) throw new HttpError(400, 'url must be an https address');
     const mode = c.mode === 'price' ? 'price' : 'text';
     const selector = typeof c.selector === 'string' && c.selector.trim() ? c.selector.trim().slice(0, 200) : undefined;
+    if (selector) validSelector(selector);
     const below = c.below === undefined || c.below === null || c.below === '' ? undefined : Number(c.below);
     if (below !== undefined && !(below > 0)) throw new HttpError(400, 'below must be a positive number');
     const intervalMin = Math.max(MIN_WATCH_MIN, Math.min(24 * 60, Math.round(Number(c.intervalMin ?? 60)) || 60));
@@ -126,20 +150,29 @@ export function validateJob(x: unknown, now: number, existing?: Job): Job {
     };
   } else throw new HttpError(400, 'kind must be watch, remind or weather');
 
+  const enabled = j.enabled !== false;
+  // A changed config starts fresh: an old price or fingerprint would compare against the wrong thing.
+  let state: JobState = existing && JSON.stringify(existing.config) === JSON.stringify(jc.config) ? existing.state : {};
+  // Resuming a watch that paused itself gives it the full allowance of failures again.
+  if (existing && !existing.enabled && enabled) state = { ...state, failures: 0 };
+  const source = existing?.source ?? origin.source;
+  const createdBy = existing ? existing.createdBy : origin.createdBy;
   const job = {
     ...jc,
     id: existing?.id ?? crypto.randomUUID(),
     title: typeof j.title === 'string' && j.title.trim() ? j.title.trim().slice(0, 100) : defaultTitle(jc),
     timezone,
     language,
-    enabled: j.enabled !== false,
+    enabled,
     ...(Number.isSafeInteger(j.chatId) ? { chatId: j.chatId as number } : existing?.chatId !== undefined ? { chatId: existing.chatId } : {}),
     createdAt: existing?.createdAt ?? now,
-    // A changed config starts fresh: an old price or fingerprint would compare against the wrong thing.
-    state: existing && JSON.stringify(existing.config) === JSON.stringify(jc.config) ? existing.state : {},
+    state,
     nextAt: 0,
+    source,
+    ...(createdBy !== undefined && { createdBy }),
   } as Job;
   job.nextAt = firstRun(job, now);
+  if (job.nextAt === null) throw new HttpError(400, 'that time has already passed: pick a later date or a repeat');
   return job;
 }
 
@@ -180,7 +213,7 @@ export function zonedTime(y: number, m: number, d: number, hh: number, mm: numbe
 const hm = (t: string) => t.split(':').map(Number) as [number, number];
 
 /** Next local `time` on a day that `ok` accepts, strictly after `after`. */
-function nextLocal(after: number, time: string, tz: string, ok: (day: { y: number; m: number; d: number; wd: number }) => boolean): number {
+function nextLocal(after: number, time: string, tz: string, ok: (day: { y: number; m: number; d: number; wd: number }) => boolean): number | null {
   const [hh, mm] = hm(time);
   const start = wallClock(after, tz);
   for (let i = 0; i < 400; i++) {
@@ -190,10 +223,10 @@ function nextLocal(after: number, time: string, tz: string, ok: (day: { y: numbe
     const ts = zonedTime(parts.y, parts.m, parts.d, hh, mm, tz);
     if (ts > after) return ts;
   }
-  return Number.POSITIVE_INFINITY;
+  return null;
 }
 
-function firstRun(job: Job, now: number): number {
+function firstRun(job: Job, now: number): number | null {
   if (job.kind === 'watch') return now + 60_000;
   if (job.kind === 'weather') return nextLocal(now, job.config.time, job.timezone, () => true);
   const [y, m, d] = job.config.date.split('-').map(Number) as [number, number, number];
@@ -202,8 +235,8 @@ function firstRun(job: Job, now: number): number {
   return first > now ? first : nextAfter(job, now);
 }
 
-/** When to run next after a run at `now`; infinity ends the job. */
-export function nextAfter(job: Job, now: number): number {
+/** When to run next after a run at `now`; null ends the job. */
+export function nextAfter(job: Job, now: number): number | null {
   if (job.kind === 'watch') return now + job.config.intervalMin * 60_000;
   if (job.kind === 'weather') return nextLocal(now, job.config.time, job.timezone, () => true);
   const c = job.config;
@@ -211,7 +244,7 @@ export function nextAfter(job: Job, now: number): number {
   const startWd = new Date(`${c.date}T12:00:00Z`).getUTCDay();
   switch (c.repeat) {
     case 'none':
-      return Number.POSITIVE_INFINITY;
+      return null;
     case 'daily':
       return nextLocal(now, c.time, job.timezone, () => true);
     case 'weekdays':
@@ -233,6 +266,8 @@ const NOTE = {
     unchanged: 'No change',
     blocked: (status: number) => `The site refused the check (HTTP ${status}). Many shops block automated checks.`,
     missing: 'The page is gone (HTTP 404). Check the address.',
+    insecure: 'The page redirects to a non-https address, so it is not checked.',
+    redirects: 'The page redirects too many times.',
     paused: (t: string) => `⏸ I paused watching “${t}”: the site kept refusing. Open the hub app to change or resume it.`,
     reminder: (text: string) => `⏰ ${text}`,
     weather: (place: string, min: number, max: number, rain: number) => `🌤 Today in ${place}: ${Math.round(min)}…${Math.round(max)}°C, chance of rain ${rain}%.`,
@@ -249,6 +284,8 @@ const NOTE = {
     unchanged: 'Без змін',
     blocked: (status: number) => `Сайт відмовив у перевірці (HTTP ${status}). Багато магазинів блокують автоматичні перевірки.`,
     missing: 'Сторінки більше немає (HTTP 404). Перевір адресу.',
+    insecure: 'Сторінка перенаправляє на адресу без https, тож її не перевіряю.',
+    redirects: 'Сторінка перенаправляє забагато разів.',
     paused: (t: string) => `⏸ Я призупинив стеження за «${t}»: сайт постійно відмовляє. Відкрий застосунок hub, щоб змінити чи відновити.`,
     reminder: (text: string) => `⏰ ${text}`,
     weather: (place: string, min: number, max: number, rain: number) => `🌤 Сьогодні в ${place}: ${Math.round(min)}…${Math.round(max)}°C, імовірність дощу ${rain}%.`,
@@ -270,7 +307,8 @@ export interface RunResult {
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 const MAX_PAGE_BYTES = 2_000_000;
-const UA = 'Mozilla/5.0 (compatible; hub-gateway/0.4; personal page watch)';
+const MAX_REDIRECTS = 5;
+const UA = 'Mozilla/5.0 (compatible; hub-gateway/0.5; personal page watch)';
 
 export async function runJob(job: Job, deps: { fetch: Fetch; now: number }): Promise<RunResult> {
   const n = NOTE[job.language];
@@ -291,11 +329,22 @@ export async function runJob(job: Job, deps: { fetch: Fetch; now: number }): Pro
 async function runWatch(job: Job & { kind: 'watch' }, base: JobState, deps: { fetch: Fetch }): Promise<RunResult> {
   const n = NOTE[job.language];
   const c = job.config;
-  const res = await deps.fetch(c.url, {
+  const init = {
     headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml', ...(job.state.etag && { 'If-None-Match': job.state.etag }) },
-    redirect: 'follow',
+    // Followed by hand so that every hop, not just the first address, has to be https.
+    redirect: 'manual' as const,
     signal: AbortSignal.timeout(15_000),
-  });
+  };
+  let url = c.url;
+  let res = await deps.fetch(url, init);
+  for (let hop = 0; res.status >= 300 && res.status < 400 && res.status !== 304 && res.headers.has('Location'); hop++) {
+    if (hop >= MAX_REDIRECTS) throw new Error(n.redirects);
+    const next = new URL(res.headers.get('Location')!, url);
+    if (next.protocol !== 'https:') throw new Error(n.insecure);
+    await res.body?.cancel();
+    url = next.href;
+    res = await deps.fetch(url, init);
+  }
   if (res.status === 304) return { state: { ...base, lastOk: true, lastResult: n.unchanged, failures: 0 } };
   if (!res.ok) throw new Error(res.status === 404 || res.status === 410 ? n.missing : n.blocked(res.status));
   const etag = res.headers.get('ETag') ?? undefined;
@@ -369,23 +418,11 @@ async function extract(res: Response, selector?: string): Promise<{ text: string
         if (key && value && /price|currency/i.test(key)) meta[key.toLowerCase()] = value;
       },
     });
-  const body = res.body ? limit(res.body, MAX_PAGE_BYTES) : null;
+  const body = res.body ? capStream(res.body, MAX_PAGE_BYTES) : null;
   await rw.transform(new Response(body, { headers: res.headers })).arrayBuffer();
   return { text, jsonLd, meta };
 }
 
-function limit(stream: ReadableStream<Uint8Array>, max: number): ReadableStream<Uint8Array> {
-  let seen = 0;
-  return stream.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, ctl) {
-        if (seen >= max) return;
-        seen += chunk.byteLength;
-        ctl.enqueue(chunk);
-      },
-    }),
-  );
-}
 
 /**
  * The price of the page's Product: JSON-LD `offers` (most shops), then price meta tags. Offers that

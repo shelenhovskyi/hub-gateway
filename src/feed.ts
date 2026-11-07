@@ -23,6 +23,16 @@ function tag(block: string, name: string): string | undefined {
   return block.match(new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)</${name}>`, 'i'))?.[1];
 }
 
+/** Links end up as an `href` in the hub app, so only web addresses survive. */
+function webLink(s: string): string {
+  try {
+    const p = new URL(s).protocol;
+    return p === 'https:' || p === 'http:' ? s : '';
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Minimal RSS 2.0 / Atom reader. Workers have no DOMParser, and the free plan allows 10 ms of CPU
  * per invocation, so this is a few regexes over at most `maxBytes` of input rather than an XML parser.
@@ -35,7 +45,7 @@ export function parseFeed(xml: string, limit = 10): FeedItem[] {
     const published = date ? Date.parse(decode(date)) : NaN;
     return {
       title: decode(tag(b, 'title') ?? ''),
-      link: decode(tag(b, 'link') ?? '') || atomLink || '',
+      link: webLink(decode(tag(b, 'link') ?? '') || decode(atomLink ?? '')),
       summary: decode(tag(b, 'description') ?? tag(b, 'summary') ?? tag(b, 'content') ?? '').slice(0, 400),
       ...(Number.isFinite(published) && { published }),
     };

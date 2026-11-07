@@ -1,5 +1,5 @@
 import { type FeedItem, parseFeed } from './feed.ts';
-import { HttpError } from './http.ts';
+import { capStream, HttpError } from './http.ts';
 
 export interface DigestConfig {
   enabled: boolean;
@@ -44,7 +44,7 @@ export function due(cfg: DigestConfig | null, now: number, lastRunAt: number | n
 export async function fetchFeed(url: string): Promise<string> {
   const res = await fetch(url, { headers: { Accept: 'application/rss+xml, application/atom+xml, text/xml' }, signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return (await res.text()).slice(0, MAX_FEED_BYTES);
+  return new Response(res.body ? capStream(res.body, MAX_FEED_BYTES) : null).text();
 }
 
 export async function buildDigest(

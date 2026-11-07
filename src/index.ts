@@ -1,15 +1,14 @@
 import * as ai from './ai.ts';
-import { type BotConfig, connect, DEFAULT_SETTINGS, handleUpdate, validateSettings } from './bot/bot.ts';
+import { type BotConfig, connect, DEFAULT_SETTINGS, validateSettings } from './bot/bot.ts';
 import { LANGS, type Lang } from './bot/strings.ts';
 import { Telegram, TgError } from './bot/telegram.ts';
 import { buildDigest, due, fetchFeed, validateConfig } from './digest.ts';
-import { validateJob } from './jobs.ts';
 import { authorized, body, cors, type Env, HttpError, json } from './http.ts';
 
 export { Store } from './store.ts';
 
 // The entry module may export only handlers and Durable Object classes; workerd refuses anything else.
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 const MODULES = ['image', 'stt', 'tts', 'digest', 'bot', 'jobs'] as const;
 const MAX_BODY = 25_000_000;
 
@@ -33,12 +32,6 @@ async function runDigest(env: Env, now: number) {
 }
 
 const randomHex = (bytes: number) => Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('');
-
-function sameSecret(a: string | null, b: string): boolean {
-  const x = new TextEncoder().encode(a ?? '');
-  const y = new TextEncoder().encode(b);
-  return x.length === y.length && crypto.subtle.timingSafeEqual(x, y);
-}
 
 /** What the hub app may see: never the bot token or the webhook secret. */
 function botStatus(cfg: BotConfig | null) {
@@ -80,19 +73,21 @@ async function botConnect(env: Env, origin: string, input: { token?: unknown; se
   return cfg;
 }
 
-async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+const MAX_UPDATE = 1_000_000;
+
+async function route(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors(env) });
   if (path === '/health') return json(env, { ok: true, version: VERSION, configured: !!env.ADMIN_TOKEN });
   // Telegram calls this one; it proves itself with the secret registered in setWebhook, not the admin token.
+  // The update is only queued here: answering Telegram at once keeps it from resending.
   if (path === '/bot/webhook' && req.method === 'POST') {
-    const cfg = await store(env).getBotConfig();
-    if (!cfg || !sameSecret(req.headers.get('X-Telegram-Bot-Api-Secret-Token'), cfg.secret)) return new Response('forbidden', { status: 403 });
-    const update = await body<Parameters<typeof handleUpdate>[0]>(req, 1_000_000);
-    // Answer Telegram at once; a slow reply would make it resend the update.
-    ctx.waitUntil(handleUpdate(update, cfg, { tg: new Telegram(cfg.token), store: store(env), run: run(env), now: Date.now() }).catch((e) => console.error('bot', e)));
-    return new Response('ok');
+    if (Number(req.headers.get('Content-Length') ?? 0) > MAX_UPDATE) return new Response('too large', { status: 413 });
+    const update = await req.text();
+    if (update.length > MAX_UPDATE) return new Response('too large', { status: 413 });
+    const ok = await store(env).enqueue(req.headers.get('X-Telegram-Bot-Api-Secret-Token'), update);
+    return ok ? new Response('ok') : new Response('forbidden', { status: 403 });
   }
   if (!authorized(req, env)) return json(env, { error: 'unauthorized' }, 401);
 
@@ -149,13 +144,9 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
     return json(env, { jobs: await s.listJobs(), notify: bot?.ownerId ? { channel: 'telegram', bot: bot.username } : { channel: 'none' } });
   }
   if (path === '/jobs' && post) {
-    const s = store(env);
-    const input = await body<{ id?: unknown }>(req, 20_000);
-    const existing = typeof input.id === 'string' ? await s.getJob(input.id) : null;
-    if (typeof input.id === 'string' && !existing) throw new HttpError(404, 'no such job');
-    const job = validateJob(input, Date.now(), existing ?? undefined);
-    await s.putJob(job);
-    return json(env, { job });
+    const r = await store(env).saveJob(await body(req, 20_000), Date.now());
+    if ('error' in r) throw new HttpError(r.status, r.error);
+    return json(env, { job: r.job });
   }
   if (path === '/jobs/delete' && post) {
     const { id } = await body<{ id?: unknown }>(req, 1000);
@@ -186,9 +177,9 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
 }
 
 export default {
-  async fetch(req, env, ctx): Promise<Response> {
+  async fetch(req, env): Promise<Response> {
     try {
-      return await route(req, env, ctx);
+      return await route(req, env);
     } catch (e) {
       if (e instanceof HttpError) return json(env, { error: e.message }, e.status);
       // Workers AI reports exhausted daily neurons as an error; pass a 429 so the hub falls back.
@@ -200,6 +191,7 @@ export default {
 
   async scheduled(event, env, ctx): Promise<void> {
     const s = store(env);
+    ctx.waitUntil(s.maintain(event.scheduledTime));
     if (due(await s.getDigestConfig(), event.scheduledTime, await s.lastDigestAt())) {
       ctx.waitUntil(runDigest(env, event.scheduledTime).then(() => undefined));
     }

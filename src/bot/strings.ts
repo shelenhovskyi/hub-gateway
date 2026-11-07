@@ -4,15 +4,17 @@ export const STRINGS = {
     help: (u: string) =>
       `I'm an AI bot running on my owner's own free Cloudflare account.\n\n` +
       `In groups, mention @${u} or reply to my message. In a private chat, just write. I understand photos and voice messages, and I can draw ("draw a cat in a hat").\n\n` +
-      `/catchup sums up the last day of this chat\n/reset forgets our recent conversation\n/facts shows what I remember about this chat\n/forget erases it\n/privacy tells where your messages go\n\nAsk me to remind you (“remind us Friday at 7 to buy tickets”) and I will.`,
+      `/catchup sums up the last day of this chat\n/reset forgets our recent conversation\n/facts shows what I remember about this chat\n/forget erases it\n/reminders lists the reminders set here\n/cancel 2 cancels the second one\n/privacy tells where your messages go\n\nAsk me to remind you (“remind us Friday at 7 to buy tickets”) and I will.`,
     privacy:
-      'Messages I answer, and in groups the recent conversation I can see (including when someone asks for /catchup), go to Cloudflare Workers AI on my owner’s Cloudflare account to write a reply. Recent messages are kept there for up to 24 hours so I can follow the conversation; facts you ask me to remember stay until /forget. Cloudflare does not use them to train models. The hub app that set me up never sees them.',
+      'Messages I answer, and in groups the recent conversation I can see (including when someone asks for /catchup), go to Cloudflare Workers AI on my owner’s Cloudflare account to write a reply. Recent messages are kept there for about a day so I can follow the conversation; facts you ask me to remember stay until /forget. Cloudflare does not use them to train models. The hub app that set me up never sees them.',
     commands: [
       ['help', 'What I can do'],
       ['catchup', 'What I missed in the last day'],
       ['reset', 'Forget our recent conversation'],
       ['facts', 'What I remember about this chat'],
       ['forget', 'Erase what I remember'],
+      ['reminders', 'Reminders set in this chat'],
+      ['cancel', 'Cancel a reminder by its number'],
       ['privacy', 'Where your messages go'],
     ],
     paired: (u: string) => `Done, you're my owner now. Write to me here, or add @${u} to a group: groups you add me to work straight away.`,
@@ -34,21 +36,32 @@ export const STRINGS = {
     drawFailed: 'The picture didn’t work out. Try describing it differently.',
     reminderSet: (when: string) => `Reminder set for ${when}.`,
     reminderFailed: 'I couldn’t set that reminder. Say the date and time again, for example “tomorrow at 9:00”.',
+    reminderLimit: (n: number) => `This chat already has ${n} reminders waiting. /reminders lists them, /cancel removes one.`,
+    repeatOwnerOnly: 'Only my owner can set repeating reminders. I can set a one-time one.',
+    rememberOwnerOnly: 'In a group only my owner can ask me to remember things.',
+    reminders: 'Reminders in this chat:',
+    noReminders: 'No reminders are set in this chat.',
+    cancelHint: 'To cancel one, send /cancel with its number, for example /cancel 1.',
+    notYours: 'Only whoever set this reminder, or my owner, can cancel it.',
+    cancelled: (text: string) => `Cancelled: ${text}`,
+    repeats: { daily: 'every day', weekdays: 'on weekdays', weekly: 'every week', monthly: 'every month' },
     catchupEmpty: 'I haven’t seen enough of this chat in the last day to sum it up. (In groups I see the conversation only if privacy mode is off in @BotFather.)',
   },
   uk: {
     help: (u: string) =>
       `Я AI-бот, що працює на власному безкоштовному акаунті Cloudflare мого власника.\n\n` +
       `У групах тегни @${u} або відповідай на моє повідомлення. В особистих просто пиши. Розумію фото й голосові, вмію малювати («намалюй кота в капелюсі»).\n\n` +
-      `/catchup підсумовує останню добу цього чату\n/reset забуває недавню розмову\n/facts показує, що я пам'ятаю про цей чат\n/forget стирає це\n/privacy розповідає, куди йдуть повідомлення\n\nПопроси нагадати («нагадай нам у п'ятницю о 19 купити квитки») — нагадаю.`,
+      `/catchup підсумовує останню добу цього чату\n/reset забуває недавню розмову\n/facts показує, що я пам'ятаю про цей чат\n/forget стирає це\n/reminders показує нагадування цього чату\n/cancel 2 скасовує друге з них\n/privacy розповідає, куди йдуть повідомлення\n\nПопроси нагадати («нагадай нам у п'ятницю о 19 купити квитки») — нагадаю.`,
     privacy:
-      'Повідомлення, на які я відповідаю, а в групах ще й недавня розмова, яку я бачу, йдуть у Cloudflare Workers AI на акаунті мого власника, щоб написати відповідь. Недавні повідомлення зберігаються там до 24 годин, щоб я тримав нитку розмови; факти, які ви просите запам’ятати, лишаються до /forget. Cloudflare не тренує на них моделі. Застосунок hub, через який мене налаштували, їх не бачить.',
+      'Повідомлення, на які я відповідаю, а в групах ще й недавня розмова, яку я бачу, йдуть у Cloudflare Workers AI на акаунті мого власника, щоб написати відповідь. Недавні повідомлення зберігаються там близько доби, щоб я тримав нитку розмови; факти, які ви просите запам’ятати, лишаються до /forget. Cloudflare не тренує на них моделі. Застосунок hub, через який мене налаштували, їх не бачить.',
     commands: [
       ['help', 'Що я вмію'],
       ['catchup', 'Що я пропустив за добу'],
       ['reset', 'Забути недавню розмову'],
       ['facts', 'Що я пам’ятаю про цей чат'],
       ['forget', 'Стерти те, що я пам’ятаю'],
+      ['reminders', 'Нагадування цього чату'],
+      ['cancel', 'Скасувати нагадування за номером'],
       ['privacy', 'Куди йдуть повідомлення'],
     ],
     paired: (u: string) => `Готово, тепер ти мій власник. Пиши мені тут або додай @${u} у групу: групи, куди мене додаєш ти, працюють одразу.`,
@@ -70,6 +83,15 @@ export const STRINGS = {
     drawFailed: 'Картинка не вийшла. Спробуй описати інакше.',
     reminderSet: (when: string) => `Нагадування поставлено на ${when}.`,
     reminderFailed: 'Не вдалося поставити нагадування. Повтори дату й час, наприклад «завтра о 9:00».',
+    reminderLimit: (n: number) => `У цьому чаті вже чекають ${n} нагадувань. /reminders покаже їх, /cancel прибере одне.`,
+    repeatOwnerOnly: 'Повторювані нагадування може ставити лише мій власник. Одноразове можу поставити.',
+    rememberOwnerOnly: 'У групі просити мене щось запам’ятати може лише мій власник.',
+    reminders: 'Нагадування в цьому чаті:',
+    noReminders: 'У цьому чаті нагадувань немає.',
+    cancelHint: 'Щоб скасувати, надішли /cancel з номером, наприклад /cancel 1.',
+    notYours: 'Скасувати це нагадування може лише той, хто його поставив, або мій власник.',
+    cancelled: (text: string) => `Скасовано: ${text}`,
+    repeats: { daily: 'щодня', weekdays: 'у будні', weekly: 'щотижня', monthly: 'щомісяця' },
     catchupEmpty: 'Я бачив замало з цього чату за добу, щоб підсумувати. (У групах я бачу розмову, лише якщо в @BotFather вимкнено privacy mode.)',
   },
 } as const;
