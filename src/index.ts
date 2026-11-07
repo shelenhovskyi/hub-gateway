@@ -8,7 +8,7 @@ import { authorized, body, cors, type Env, HttpError, json } from './http.ts';
 export { Store } from './store.ts';
 
 // The entry module may export only handlers and Durable Object classes; workerd refuses anything else.
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const MODULES = ['image', 'stt', 'tts', 'digest', 'bot'] as const;
 const MAX_BODY = 25_000_000;
 

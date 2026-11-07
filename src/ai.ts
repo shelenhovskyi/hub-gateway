@@ -26,13 +26,17 @@ export async function image(run: Run, input: { prompt?: unknown; model?: unknown
   return { image: out.image };
 }
 
-export async function stt(run: Run, input: { audio?: unknown; model?: unknown; language?: unknown }): Promise<{ text: string }> {
+export async function stt(
+  run: Run,
+  input: { audio?: unknown; model?: unknown; language?: unknown; segments?: unknown },
+): Promise<{ text: string; segments?: { start: number; end: number; text: string }[] }> {
   if (typeof input.audio !== 'string' || !input.audio) throw new HttpError(400, 'audio (base64) required');
   const out = (await run(pick(input.model, MODELS.stt), {
     audio: input.audio,
     ...(typeof input.language === 'string' && input.language && { language: input.language }),
-  })) as { text: string };
-  return { text: out.text };
+  })) as { text: string; segments?: { start: number; end: number; text: string }[] };
+  if (input.segments !== true) return { text: out.text };
+  return { text: out.text, segments: (out.segments ?? []).map((x) => ({ start: x.start, end: x.end, text: x.text.trim() })) };
 }
 
 /** MeloTTS takes its own codes for Japanese and Korean, not ISO 639-1. */
