@@ -35,11 +35,13 @@ export async function stt(run: Run, input: { audio?: unknown; model?: unknown; l
   return { text: out.text };
 }
 
-export async function tts(run: Run, input: { text?: unknown; model?: unknown; language?: unknown }): Promise<{ audio: string }> {
+/** MeloTTS takes its own codes for Japanese and Korean, not ISO 639-1. */
+const MELO_LANG: Record<string, string> = { ja: 'jp', ko: 'kr' };
+
+export async function tts(run: Run, input: { text?: unknown; model?: unknown; language?: unknown }): Promise<{ audio: string; type: string }> {
   if (typeof input.text !== 'string' || !input.text.trim()) throw new HttpError(400, 'text required');
-  const out = (await run(pick(input.model, MODELS.tts), {
-    prompt: input.text.slice(0, 4000),
-    lang: typeof input.language === 'string' && input.language ? input.language : 'en',
-  })) as { audio: string };
-  return { audio: out.audio };
+  const lang = typeof input.language === 'string' && input.language ? input.language : 'en';
+  const out = (await run(pick(input.model, MODELS.tts), { prompt: input.text.slice(0, 4000), lang: MELO_LANG[lang] ?? lang })) as { audio: string };
+  // MeloTTS returns WAV; other models may return MP3. "UklGR" is base64 for "RIFF".
+  return { audio: out.audio, type: out.audio.startsWith('UklGR') ? 'audio/wav' : 'audio/mpeg' };
 }
