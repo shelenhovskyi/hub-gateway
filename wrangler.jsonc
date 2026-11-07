@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hub-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "ai": { "binding": "AI" },
+  "durable_objects": { "bindings": [{ "name": "STORE", "class_name": "Store" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Store"] }],
+  // Hourly, and each module decides whether it's its turn: the free plan allows only 5 cron
+  // triggers per account, so one shared trigger leaves room for the user's other projects.
+  "triggers": { "crons": ["0 * * * *"] },
+  "vars": { "ALLOWED_ORIGIN": "*" },
+  "observability": { "enabled": true }
+}

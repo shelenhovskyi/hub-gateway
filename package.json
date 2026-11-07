@@ -1,0 +1,23 @@
+{
+  "name": "hub-gateway",
+  "private": true,
+  "type": "module",
+  "description": "Your own hub gateway: Workers AI and scheduled tools on your free Cloudflare account.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit"
+  },
+  "cloudflare": {
+    "bindings": {
+      "ADMIN_TOKEN": {
+        "description": "Any long random string (for example from a password manager). Paste the same value into the hub app to connect it to this gateway."
+      }
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261029.1",
+    "typescript": "7.0.2",
+    "wrangler": "4.156.0"
+  }
+}

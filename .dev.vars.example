@@ -1,0 +1,2 @@
+# Any long random string. The hub app sends it as "Authorization: Bearer <token>".
+ADMIN_TOKEN=
