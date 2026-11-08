@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { BotConfig, ChatRow } from './bot/bot.ts';
 import { Data, DataError } from './data.ts';
+import { NotifyError } from './notify.ts';
 import { Telegram } from './bot/telegram.ts';
 import type { Digest, DigestConfig } from './digest.ts';
 import type { Env } from './http.ts';
@@ -172,14 +173,40 @@ export class Store extends DurableObject<Env> {
     }
   }
 
-  /** Tells the owner through their Telegram bot, if they have one; a failed message never loses the answer. */
+  /** Tells the owner on every channel they set up; a failed message never loses the answer. */
   async #notifyForm(title: string, fields: { id: string; label: string }[], answers: Record<string, string>): Promise<void> {
-    const bot = this.#hub.db.getBotConfig();
-    if (!bot?.ownerId) return;
     const lines = fields.filter((f) => answers[f.id]).map((f) => `${f.label}: ${answers[f.id]!.slice(0, 300)}`);
-    const text = `📝 ${title}\n\n${lines.join('\n')}`.slice(0, 4000);
-    await new Telegram(bot.token).call('sendMessage', { chat_id: bot.ownerId, text, link_preview_options: { is_disabled: true } }).catch(() => {});
+    await this.#hub.notifyOwner(`📝 ${title}`, `📝 ${title}\n\n${lines.join('\n')}`.slice(0, 4000)).catch(() => []);
   }
+
+  /** Notification channels besides Telegram: email and browser push. */
+  async notify(op: 'status' | 'email' | 'emailOff' | 'push' | 'pushOff' | 'test', input?: unknown): Promise<{ ok: unknown } | { error: string; status: number }> {
+    const n = this.#hub.notifier;
+    try {
+      switch (op) {
+        case 'status':
+          return { ok: await n.status(!!this.#hub.db.getBotConfig()?.ownerId) };
+        case 'email':
+          return { ok: await n.setEmail((input ?? {}) as Record<string, unknown>) };
+        case 'emailOff':
+          return { ok: n.clearEmail() };
+        case 'push':
+          return { ok: n.addPush((input ?? {}) as Record<string, never>) };
+        case 'pushOff':
+          return { ok: n.removePush((input as { endpoint?: unknown } | undefined)?.endpoint) };
+        case 'test':
+          return { ok: { failures: await this.#hub.notifyOwner('hub', 'Test: notifications from your gateway work.') } };
+      }
+    } catch (e) {
+      if (e instanceof NotifyError) return { error: e.message, status: e.status };
+      throw e;
+    }
+  }
+
+  notifyAny(): boolean {
+    return this.#hub.notifier.any();
+  }
+
 
   override alarm(): Promise<void> {
     return this.#hub.alarm();
