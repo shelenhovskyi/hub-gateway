@@ -11,8 +11,8 @@ import { sha256 } from './data.ts';
 export { Store } from './store.ts';
 
 // The entry module may export only handlers and Durable Object classes; workerd refuses anything else.
-const VERSION = '0.6.0';
-const MODULES = ['image', 'stt', 'tts', 'digest', 'bot', 'jobs', 'vault', 'lists', 'forms'] as const;
+const VERSION = '0.7.0';
+const MODULES = ['image', 'stt', 'tts', 'digest', 'bot', 'jobs', 'vault', 'lists', 'forms', 'notify'] as const;
 const MAX_BODY = 25_000_000;
 
 const store = (env: Env) => env.STORE.get(env.STORE.idFromName('main'));
@@ -198,7 +198,8 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (path === '/jobs' && !post) {
     const s = store(env);
     const bot = await s.getBotConfig();
-    return json(env, { jobs: await s.listJobs(), notify: bot?.ownerId ? { channel: 'telegram', bot: bot.username } : { channel: 'none' } });
+    const others = await s.notifyAny();
+    return json(env, { jobs: await s.listJobs(), notify: bot?.ownerId ? { channel: 'telegram', bot: bot.username, others } : { channel: others ? 'other' : 'none' } });
   }
   if (path === '/jobs' && post) {
     const r = await store(env).saveJob(await body(req, 20_000), Date.now());
@@ -237,6 +238,14 @@ async function route(req: Request, env: Env): Promise<Response> {
     return json(env, await data(env, 'vaultPut', b.body, b.baseVersion, b.device));
   }
   if (path === '/vault/delete' && post) return json(env, { ok: await data(env, 'vaultDelete') });
+  if (path.startsWith('/notify')) {
+    const op = ({ '/notify': 'status', '/notify/email': 'email', '/notify/email/delete': 'emailOff', '/notify/push': 'push', '/notify/push/delete': 'pushOff', '/notify/test': 'test' } as const)[path];
+    if (op && (op === 'status') === !post) {
+      const r = (await store(env).notify(op, post ? await body(req, 10_000) : undefined)) as { ok: unknown } | { error: string; status: number };
+      if ('error' in r) throw new HttpError(r.status, r.error);
+      return json(env, { ok: true, ...(r.ok && typeof r.ok === 'object' ? r.ok : {}) });
+    }
+  }
   if (path === '/lists' && !post) return json(env, { lists: await data(env, 'lists') });
   if (path === '/lists/one' && !post) return json(env, { list: await data(env, 'list', url.searchParams.get('id') ?? '') });
   if (path === '/lists' && post) return json(env, await data(env, 'listCreate', (await body<{ title?: unknown }>(req, 2000)).title));

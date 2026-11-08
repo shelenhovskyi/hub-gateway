@@ -1,5 +1,6 @@
 import { type BotStore, commandsKey, handleUpdate, sendCommands } from './bot/bot.ts';
 import type { Telegram, TgUpdate } from './bot/telegram.ts';
+import { Notifier } from './notify.ts';
 import { Db, type Sql } from './db.ts';
 import { HttpError, sameSecret } from './http.ts';
 import { type Job, MAX_JOBS, nextAfter, runJob, validateJob } from './jobs.ts';
@@ -31,6 +32,7 @@ export type SaveJobResult = { job: Job } | { status: number; error: string };
  */
 export class Hub {
   readonly db: Db;
+  readonly notifier: Notifier;
   readonly bot: BotStore;
   #running = new Set<string>();
   #chats = new Map<number, Promise<void>>();
@@ -38,6 +40,7 @@ export class Hub {
 
   constructor(private readonly deps: HubDeps) {
     this.db = new Db(deps.sql, deps.transaction);
+    this.notifier = new Notifier(this.db, (u, i) => deps.fetch(u, i), deps.now);
     const db = this.db;
     this.bot = {
       getBotConfig: async () => db.getBotConfig(),
@@ -153,7 +156,7 @@ export class Hub {
       let state = r.state;
       if (r.notify) {
         const failed = await this.#notify(job, r.notify);
-        if (failed) state = { ...state, lastOk: false, lastResult: `Telegram: ${failed}` };
+        if (failed) state = { ...state, lastOk: false, lastResult: failed };
       }
       this.db.finish(job.id, version, state, !!r.disable);
     } finally {
@@ -161,17 +164,36 @@ export class Hub {
     }
   }
 
-  /** The error text when Telegram refused the message; null when sent, or when there is no bot to send through. */
+  /**
+   * A group's reminder goes only to that group. Everything else goes to the owner on every channel
+   * they set up: the Telegram bot, email, push. Returns what failed, or null when all got through.
+   */
   async #notify(job: Job, text: string): Promise<string | null> {
+    if (job.chatId !== undefined) return this.#telegram(job.chatId, text);
+    const failures = await this.notifyOwner(job.title, text);
+    return failures.length ? failures.join('; ') : null;
+  }
+
+  async notifyOwner(title: string, text: string): Promise<string[]> {
+    const owner = this.db.getBotConfig()?.ownerId;
+    const failures: string[] = [];
+    if (owner) {
+      const err = await this.#telegram(owner, text);
+      if (err) failures.push(err);
+    }
+    failures.push(...(await this.notifier.send(title, text)));
+    return failures;
+  }
+
+  async #telegram(chat: number, text: string): Promise<string | null> {
     const cfg = this.db.getBotConfig();
-    const chat = job.chatId ?? cfg?.ownerId;
-    if (!cfg || !chat) return null;
+    if (!cfg) return null;
     try {
       await this.deps.telegram(cfg.token).call('sendMessage', { chat_id: chat, text, link_preview_options: { is_disabled: true } });
       return null;
     } catch (e) {
       console.error('notify', e);
-      return e instanceof Error ? e.message : String(e);
+      return `Telegram: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
 

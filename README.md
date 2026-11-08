@@ -13,6 +13,8 @@ Your own backend for hub, on your free Cloudflare account. It gives the hub app:
 - **Shared lists**: shopping and to-do lists that family open by a link (`/l/<id>#<secret>`), no app or account; the secret after `#` never reaches a server log, the gateway keeps only its hash, and a new link shuts the old one. A link can make at most 600 changes a day;
 - **Forms**: sign-up, RSVP and order forms at `/f/<id>` with answers kept here and sent to your Telegram bot. A new form starts closed; open ones take a daily number of answers you set (100 by default, 1000 at most), at most 10 a day from one network, and quietly drop bots that fill a hidden field or answer faster than a person could.
 
+- **Notifications**: besides the Telegram bot, reminders, watches and form answers can reach you as push notifications (encrypted for each browser you allow, VAPID keys made on your gateway) and by email through your own Resend key, which is checked with a test email before it is kept and never sent back to the app.
+
 Nothing here is shared with the hub's authors: the Worker runs in your account and only answers requests that carry your admin token.
 
 ## Deploy
