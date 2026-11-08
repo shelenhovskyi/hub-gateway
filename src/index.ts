@@ -4,15 +4,70 @@ import { LANGS, type Lang } from './bot/strings.ts';
 import { Telegram, TgError } from './bot/telegram.ts';
 import { buildDigest, due, fetchFeed, validateConfig } from './digest.ts';
 import { authorized, body, cors, type Env, HttpError, json } from './http.ts';
+import { formDone, formError, formPage, listPage, pageLang } from './pages.ts';
+import type { DataOp } from './store.ts';
+import { sha256 } from './data.ts';
 
 export { Store } from './store.ts';
 
 // The entry module may export only handlers and Durable Object classes; workerd refuses anything else.
-const VERSION = '0.5.0';
-const MODULES = ['image', 'stt', 'tts', 'digest', 'bot', 'jobs'] as const;
+const VERSION = '0.6.0';
+const MODULES = ['image', 'stt', 'tts', 'digest', 'bot', 'jobs', 'vault', 'lists', 'forms'] as const;
 const MAX_BODY = 25_000_000;
 
 const store = (env: Env) => env.STORE.get(env.STORE.idFromName('main'));
+
+/** Runs a user-data operation in the Durable Object; its refusals come back as HttpErrors. */
+async function data<T>(env: Env, op: DataOp, ...args: unknown[]): Promise<T> {
+  const r = (await store(env).data(op, ...args)) as { ok: unknown } | { error: string; status: number };
+  if ('error' in r) throw new HttpError(r.status, r.error);
+  return r.ok as T;
+}
+
+const nonce = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+/** A form must not be answered faster than a person could; bots post at once. */
+const MIN_FILL_MS = 2500;
+
+/** Pages and calls that strangers reach with a link: a shared list and a form. No admin token here. */
+async function publicRoute(req: Request, env: Env, path: string): Promise<Response | null> {
+  const list = /^\/l\/([\w-]{6,40})(\/data|\/change)?$/.exec(path);
+  if (list) {
+    const [, id, sub] = list as unknown as [string, string, string | undefined];
+    if (!sub && req.method === 'GET') return listPage(pageLang(req), nonce());
+    const secret = req.headers.get('X-List-Secret') ?? '';
+    if (sub === '/data' && req.method === 'GET') return json(env, { list: await data(env, 'guestList', id, secret) });
+    if (sub === '/change' && req.method === 'POST') return json(env, { list: await data(env, 'guestList', id, secret, await body(req, 5000)) });
+    return null;
+  }
+  const form = /^\/f\/([\w-]{6,40})$/.exec(path);
+  if (form) {
+    const id = form[1]!;
+    const lang = pageLang(req);
+    const found = await data<{ form: import('./data.ts').Form; state: 'open' | 'closed' | 'full' } | null>(env, 'form', id);
+    if (!found) return new Response('not found', { status: 404 });
+    if (req.method === 'GET') return formPage(lang, found.form, found.state, Date.now());
+    if (req.method !== 'POST') return null;
+    if (Number(req.headers.get('Content-Length') ?? 0) > 100_000) return formError(lang, found.form.title, 'too large', 413);
+    const fd = await req.formData().catch(() => null);
+    if (!fd) return formError(lang, found.form.title, 'bad request', 400);
+    // The hidden "website" field is invisible to people; whatever fills it is a bot. It gets a thank-you and nothing is kept.
+    if (String(fd.get('website') ?? '')) return formDone(lang, found.form);
+    const started = Number(fd.get('_t'));
+    if (!Number.isFinite(started) || Date.now() - started < MIN_FILL_MS) return formDone(lang, found.form);
+    const answers: Record<string, unknown> = {};
+    for (const [k, v] of fd) if (k.startsWith('a_') && typeof v === 'string') answers[k.slice(2)] = v;
+    // Only a hash of the address is kept, for the per-day limit, and it expires with the counter.
+    const address = (await sha256(`${req.headers.get('CF-Connecting-IP') ?? ''}|${id}`)).slice(0, 24);
+    try {
+      await data(env, 'formSubmit', id, answers, address);
+    } catch (e) {
+      if (e instanceof HttpError) return formError(lang, found.form.title, e.message, e.status);
+      throw e;
+    }
+    return formDone(lang, found.form);
+  }
+  return null;
+}
 const run = (env: Env) => (model: string, input: Record<string, unknown>) => env.AI.run(model as Parameters<Ai['run']>[0], input as never);
 
 async function runDigest(env: Env, now: number) {
@@ -89,6 +144,8 @@ async function route(req: Request, env: Env): Promise<Response> {
     const ok = await store(env).enqueue(req.headers.get('X-Telegram-Bot-Api-Secret-Token'), update);
     return ok ? new Response('ok') : new Response('forbidden', { status: 403 });
   }
+  const pub = await publicRoute(req, env, path);
+  if (pub) return pub;
   if (!authorized(req, env)) return json(env, { error: 'unauthorized' }, 401);
 
   const post = req.method === 'POST';
@@ -172,6 +229,28 @@ async function route(req: Request, env: Env): Promise<Response> {
       places: (data.results ?? []).map((r) => ({ name: [r.name, r.admin1, r.country].filter(Boolean).join(', '), lat: r.latitude, lon: r.longitude, timezone: r.timezone })),
     });
   }
+  // Sync: one sealed blob the app encrypted with the user's passphrase; the gateway never sees inside.
+  if (path === '/vault/meta' && !post) return json(env, await data(env, 'vaultMeta'));
+  if (path === '/vault' && !post) return json(env, await data(env, 'vaultGet'));
+  if (path === '/vault' && post) {
+    const b = await body<{ body?: unknown; baseVersion?: unknown; device?: unknown }>(req, MAX_BODY);
+    return json(env, await data(env, 'vaultPut', b.body, b.baseVersion, b.device));
+  }
+  if (path === '/vault/delete' && post) return json(env, { ok: await data(env, 'vaultDelete') });
+  if (path === '/lists' && !post) return json(env, { lists: await data(env, 'lists') });
+  if (path === '/lists/one' && !post) return json(env, { list: await data(env, 'list', url.searchParams.get('id') ?? '') });
+  if (path === '/lists' && post) return json(env, await data(env, 'listCreate', (await body<{ title?: unknown }>(req, 2000)).title));
+  if (path === '/lists/change' && post) {
+    // `list` names the list; `id` in the same body is the item a change is about.
+    const b = await body<{ list?: unknown }>(req, 5000);
+    return json(env, { list: await data(env, 'listChange', b.list, b) });
+  }
+  if (path === '/lists/rotate' && post) return json(env, { secret: await data(env, 'listRotate', (await body<{ id?: unknown }>(req, 1000)).id) });
+  if (path === '/lists/delete' && post) return json(env, { ok: await data(env, 'listDelete', (await body<{ id?: unknown }>(req, 1000)).id) });
+  if (path === '/forms' && !post) return json(env, { forms: await data(env, 'forms') });
+  if (path === '/forms' && post) return json(env, { form: await data(env, 'formSave', await body(req, 50_000)) });
+  if (path === '/forms/delete' && post) return json(env, { ok: await data(env, 'formDelete', (await body<{ id?: unknown }>(req, 1000)).id) });
+  if (path === '/forms/responses' && !post) return json(env, { responses: await data(env, 'formResponses', url.searchParams.get('id') ?? '') });
   if (path === '/digest/run' && post) return json(env, { digest: await runDigest(env, Date.now()) });
   return json(env, { error: 'not found' }, 404);
 }
